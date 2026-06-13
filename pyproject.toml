@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "coord-review"
+version = "0.1.0"
+description = "MCP server that lets a coding agent ask another coding agent (Claude, Codex, or Cursor) to review its work, with resumable follow-up sessions."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "coord-review" }]
+keywords = ["mcp", "claude", "cursor", "codex", "code-review", "agent"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+  "mcp[cli]>=1.27",
+  "pydantic>=2.0",
+]
+
+[project.scripts]
+coord-review = "coord_review.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/coord_review"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/coord_review", "README.md", "pyproject.toml"]
