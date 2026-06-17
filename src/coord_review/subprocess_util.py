@@ -23,6 +23,32 @@ from typing import Optional, Sequence
 # reviewer is wedged.
 DEFAULT_TIMEOUT_SEC = float(os.environ.get("COORD_REVIEW_TIMEOUT", "600"))
 
+# Recursion-depth sentinel. Every reviewer subprocess we spawn inherits an
+# incremented value of this env var. The coord-review server started inside
+# that subprocess (codex/cursor pull their MCP servers into the child agent)
+# therefore sees a non-zero depth, and the tool handlers refuse to spawn yet
+# another reviewer. This is the structural backstop against unbounded nesting:
+# a coder agent reviewing its own work may, "reasonably", call review_repo
+# again — without this guard codex1 spawns codex2 spawns codex3 ... and we get
+# a fork bomb. Tool-description hints discourage the top-level agent from
+# fanning out, but only this env check actually stops the recursion.
+_DEPTH_ENV = "COORD_REVIEW_DEPTH"
+
+
+def current_depth() -> int:
+    """Depth of *this* process in the reviewer-spawn tree. 0 at the top level."""
+    try:
+        return max(0, int(os.environ.get(_DEPTH_ENV, "0")))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _child_env() -> dict[str, str]:
+    """``os.environ`` copy with the depth sentinel incremented for the child."""
+    env = dict(os.environ)
+    env[_DEPTH_ENV] = str(current_depth() + 1)
+    return env
+
 
 class ReviewerNotFoundError(RuntimeError):
     """Raised when a reviewer's CLI binary isn't on PATH."""
@@ -106,6 +132,11 @@ async def stream_subprocess(
         # whole tree on timeout. Reviewers (claude, cursor-agent) spawn
         # node/LSP children; killing only the direct child orphans those.
         start_new_session=True,
+        # Inherit a copy of the environment with the recursion-depth sentinel
+        # incremented. The reviewer CLI (and any coord-review server it starts
+        # inside the child agent) sees this and refuses to nest further. See
+        # _DEPTH_ENV / current_depth() for the rationale.
+        env=_child_env(),
     )
 
     stdout_lines: list[str] = []

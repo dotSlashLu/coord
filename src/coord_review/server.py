@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import time
 from pathlib import Path
 from typing import Annotated, Callable, Literal
 
@@ -16,6 +17,7 @@ from coord_review.reviewers import get_reviewer
 from coord_review.reviewers.base import ReviewResult
 from coord_review.subprocess_util import (
     ReviewerNotFoundError,
+    current_depth,
 )
 
 
@@ -46,11 +48,7 @@ _BRIEF_DESCRIPTION = (
     "The reviewer reads files itself; this brief is the contract."
 )
 _REVIEWER_DESCRIPTION = (
-    'Which reviewer CLI to invoke. "claude" uses the Claude Code CLI; '
-    '"codex" uses the Codex CLI; "cursor" uses the Cursor agent CLI. '
-    "All produce equivalent review reports — pick whichever is installed "
-    "(or whichever the user prefers; "
-    "they differ in cost and latency, not in capability for this task)."
+    'Which reviewer CLI to invoke. ASK THE USER which one to use. '
 )
 _QUESTION_DESCRIPTION = (
     "Follow-up question for the reviewer. Use this when a finding is "
@@ -68,6 +66,48 @@ _QUESTION_DESCRIPTION = (
 # the oldest line rather than block the subprocess drain.
 _LOG_QUEUE_MAX = 256
 
+# Heartbeat interval, seconds. While a reviewer subprocess is running the pump
+# emits a progress notification + info message at this cadence so clients with
+# idle timeouts don't kill the connection during quiet periods.  Set to 0 to
+# disable heartbeat entirely.
+_HEARTBEAT_SEC = max(0.0, float(os.environ.get("COORD_REVIEW_HEARTBEAT_SEC", "30")))
+
+# Maximum reviewer-spawn depth. 1 (the default) means only the top-level
+# coord-review server may launch a reviewer; any server started *inside* a
+# reviewer subprocess (depth >= 1) refuses. Set higher to allow controlled
+# nesting, but beware the fork-bomb risk — see _DEPTH_ENV in subprocess_util.
+_MAX_DEPTH = max(1, int(os.environ.get("COORD_REVIEW_MAX_DEPTH", "1")))
+
+# Hint appended to each tool description: discourages the top-level agent from
+# proactively fanning out review (and from calling these tools inside a review
+# sub-flow). This is a soft nudge only — the hard backstop is the depth check
+# in _refuse_if_nested().
+_NESTING_HINT = (
+    "Only call this when the user has explicitly asked to use coord-review to "
+    "review code. Do NOT proactively invoke it without an explicit user "
+    "request, and never call it from inside a review sub-flow — that nests "
+    "reviewers and is blocked regardless."
+)
+
+
+def _refuse_if_nested() -> None:
+    """Raise if this server is itself running inside a reviewer subprocess.
+
+    The structural backstop against recursive review (codex1 -> codex2 -> ...).
+    ``current_depth()`` reflects the ``COORD_REVIEW_DEPTH`` sentinel injected by
+    ``stream_subprocess`` when the parent reviewer CLI spawned us; a non-zero
+    value means we are a nested server and must not launch yet another reviewer.
+    """
+    depth = current_depth()
+    if depth >= _MAX_DEPTH:
+        raise RuntimeError(
+            "coord-review refused to launch a reviewer: this server is running "
+            f"inside a reviewer subprocess (depth {depth} >= max {_MAX_DEPTH}). "
+            "Nested review is disabled to prevent unbounded recursion "
+            "(codex1 -> codex2 -> codex3 ...). Run review from the top-level "
+            "session instead, or raise COORD_REVIEW_MAX_DEPTH to allow nesting."
+        )
+
 
 class _LogPump:
     """Bounded queue + single writer that forwards reviewer stderr to ``ctx.info``.
@@ -84,12 +124,21 @@ class _LogPump:
 
     This pump fixes all three: bounded queue, one writer, awaits drain on
     exit, and propagates cancellation cleanly.
+
+    A heartbeat timer runs alongside the writer: every
+    ``_HEARTBEAT_SEC`` seconds it emits a ``ctx.report_progress()`` (when
+    the client supplied a progressToken) and a ``ctx.info()`` (unconditional
+    keep-alive).  This prevents clients with idle timeouts from killing the
+    connection while the reviewer is thinking silently.
     """
 
     def __init__(self, ctx: Context) -> None:
         self._ctx = ctx
         self._queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=_LOG_QUEUE_MAX)
         self._writer_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None
+        self._heartbeat_interval = _HEARTBEAT_SEC
+        self._start: float = 0.0
         self._dropped = 0
 
     def push(self, line: str) -> None:
@@ -110,6 +159,22 @@ class _LogPump:
             except asyncio.QueueFull:
                 self._dropped += 1
 
+    async def _heartbeat(self) -> None:
+        """Periodic keep-alive: sends progress + info notifications."""
+        self._start = time.monotonic()
+        while True:
+            await asyncio.sleep(self._heartbeat_interval)
+            elapsed = int(time.monotonic() - self._start)
+            msg = f"[coord-review] reviewer still running ({elapsed}s elapsed)"
+            # Structured progress notification (no-ops if client didn't send progressToken)
+            with contextlib.suppress(Exception):
+                await self._ctx.report_progress(
+                    elapsed, total=None, message="reviewer still running"
+                )
+            # Unconditional info as fallback keep-alive for clients without progressToken
+            with contextlib.suppress(Exception):
+                await self._ctx.info(msg)
+
     async def _run(self) -> None:
         while True:
             line = await self._queue.get()
@@ -123,9 +188,18 @@ class _LogPump:
 
     async def __aenter__(self) -> "_LogPump":
         self._writer_task = asyncio.create_task(self._run())
+        if self._heartbeat_interval > 0:
+            self._heartbeat_task = asyncio.create_task(self._heartbeat())
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
+        # Stop heartbeat first — no more keep-alive needed.
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._heartbeat_task
+            self._heartbeat_task = None
+
         # Signal the writer to drain and stop; wait for it to finish so we
         # don't return from the tool with notifications still in flight.
         # Use put_nowait with drop-oldest so a full queue + slow transport
@@ -246,7 +320,15 @@ async def review_repo(
       `status` and only useful for debugging.
     - `stderr_tail` (str): last 40 lines of reviewer stderr, for debugging
       crashes or empty reports.
+
+    IMPORTANT: do not blindly accept everything in `report`. Assess whether
+    each finding is real and actually needs fixing. If you are unsure about a
+    finding, explain your reasoning (e.g. relevant code context, design intent)
+    to the user and let them decide instead of applying the change yourself.
+
+    """ + _NESTING_HINT + """
     """
+    _refuse_if_nested()
     repo = _ensure_absolute("repo_dir", repo_dir)
     if not repo.is_dir():
         raise ValueError(f"repo_dir does not exist or is not a directory: {repo}")
@@ -297,7 +379,15 @@ async def review_file(
     `session_id` (empty on failure), `status` (`"ok" | "error" | "timeout"`),
     `report`, `returncode`, and `stderr_tail`. Follow up via `ask_reviewer`
     with the returned `session_id`.
+
+    IMPORTANT: do not blindly accept everything in `report`. Assess whether
+    each finding is real and actually needs fixing. If you are unsure about a
+    finding, explain your reasoning (e.g. relevant code context, design intent)
+    to the user and let them decide instead of applying the change yourself.
+
+    """ + _NESTING_HINT + """
     """
+    _refuse_if_nested()
     target = _ensure_absolute("file_path", file_path)
     if not target.is_file():
         raise ValueError(f"file_path does not exist or is not a file: {target}")
@@ -347,7 +437,15 @@ async def ask_reviewer(
     `reviewer`, `session_id`, `status` (`"ok" | "error" | "timeout"`),
     `report`, `returncode`, and `stderr_tail`. The `report` field holds
     the reviewer's answer to this follow-up.
+
+    IMPORTANT: do not blindly accept everything in `report`. Assess whether
+    each finding is real and actually needs fixing. If you are unsure about a
+    finding, explain your reasoning (e.g. relevant code context, design intent)
+    to the user and let them decide instead of applying the change yourself.
+
+    """ + _NESTING_HINT + """
     """
+    _refuse_if_nested()
     if not question.strip():
         raise ValueError("question must not be empty")
 

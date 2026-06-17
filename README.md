@@ -99,6 +99,7 @@ Environment variables, all optional:
 | `COORD_REVIEW_CODEX_MODEL`     | Codex CLI default        | Optional model passed to `codex --model`.      |
 | `COORD_REVIEW_CODEX_SANDBOX`   | `read-only`              | Sandbox passed to `codex --sandbox`.           |
 | `COORD_REVIEW_CURSOR_MODEL`    | `claude-4.6-opus-high-thinking` | Model passed to `cursor-agent --model`.        |
+| `COORD_REVIEW_MAX_DEPTH`       | `1`                      | How deep reviewer spawning may nest (see [Nested-review guard](#nested-review-guard)). |
 
 ## Sandbox behavior — what each reviewer can actually do
 
@@ -128,6 +129,40 @@ Cursor's CLI doesn't have a per-tool allowlist. The realistic options are
 `--plan` (no shell at all — too restrictive to run `git diff`) or `--force` /
 `--yolo` (allow all). We use `--force`, scoped to the directory you pass via
 `--workspace`. **Run only inside a workspace you'd be willing to trust.**
+
+## Nested-review guard
+
+There is a recursion hazard unique to this design. When you ask a coding agent
+to review code and that agent (say Codex) is itself one of the reviewer CLIs,
+the reviewer subprocess runs a *full* agent that can see the same MCP servers
+its parent sees — including this one. So `review_repo` → reviewer subprocess →
+the subprocess's agent calls `review_repo` again → spawns another reviewer → …
+and you get an unbounded chain (`codex1` → `codex2` → `codex3` → …), i.e. a
+fork bomb. The task semantics ("review this code") and the tool's purpose
+overlap heavily, so a model can arrive at the recursive call quite "reasonably".
+
+coord-review blocks this with two layers:
+
+1. **Structural backstop (hard).** Every reviewer subprocess is spawned with
+   `COORD_REVIEW_DEPTH` incremented in its environment. The coord-review server
+   started *inside* that subprocess (Codex/Cursor pull their configured MCP
+   servers into the child agent) therefore inherits a non-zero depth and
+   **refuses to launch another reviewer** — `review_repo`, `review_file`, and
+   `ask_reviewer` all raise before spawning anything. This is independent of
+   what the model decides to do; the parent process set the boundary.
+   - The Claude reviewer already had a hard tool whitelist (`--allowedTools`
+     with no `mcp__coord-review__*`), so it physically cannot recurse — the env
+     check is the equivalent backstop for the Codex and Cursor paths.
+2. **Tool-description hint (soft).** Each tool's docstring tells the calling
+   agent to only invoke it when the user explicitly asked for a coord-review
+   review, and never from inside a review sub-flow. This steers the *top-level*
+   agent (the one with a real user in the loop) away from fanning out
+   proactively; layer 1 catches anything that ignores it.
+
+`COORD_REVIEW_MAX_DEPTH` (default `1`) controls the cutoff. `1` means only the
+top-level server may spawn a reviewer — any nested server refuses. Raise it if
+you genuinely want controlled nesting, but be aware that each extra level is
+another agent that can spawn more, so the fork-bomb risk grows fast.
 
 ## Caveats
 
