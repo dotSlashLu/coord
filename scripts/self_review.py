@@ -18,7 +18,7 @@ async def main() -> None:
     repo = str(Path(__file__).resolve().parents[1])
     brief = (
         "Please review this Python MCP server (`coord-review`). It's a stdio "
-        "FastMCP server that exposes three tools — `review_repo`, "
+        "MCP server that exposes three tools — `review_repo`, "
         "`review_file`, `ask_reviewer` — that wrap the Claude Code and Cursor "
         "CLIs as code reviewers, so a coding agent (e.g. Codex) can ask "
         "another agent to review its work and follow up via session resume.\n\n"
@@ -26,7 +26,7 @@ async def main() -> None:
         "1. Correctness — anything that wouldn't actually work as advertised. "
         "Pay particular attention to `src/coord_review/reviewers/cursor.py` "
         "(the `cursor-agent` argv shape) and `src/coord_review/server.py` "
-        "(the FastMCP tool definitions).\n"
+        "(the MCP tool definitions).\n"
         "2. Concurrency — the async subprocess helper in "
         "`src/coord_review/subprocess_util.py` and the `loop.create_task` "
         "bridge in `server.py:_make_log_line`. Are there races, leaked tasks, "

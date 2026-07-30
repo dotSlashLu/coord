@@ -27,7 +27,7 @@ async def main() -> None:
     question = (
         "Quick meta-check: in my original review request I asked you to focus "
         "on four specific areas — correctness (esp. cursor.py argv and "
-        "server.py FastMCP defs), concurrency (subprocess_util.py + "
+        "server.py MCP defs), concurrency (subprocess_util.py + "
         "_make_log_line), robustness (JSON envelope parsing), and the session "
         "store's atomic-write pattern. Can you quote back, verbatim or "
         "paraphrased, the exact phrasing of focus area #2 (concurrency) from "

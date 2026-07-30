@@ -1,4 +1,4 @@
-"""FastMCP server exposing review_repo / review_file / ask_reviewer tools."""
+"""MCP server exposing review_repo / review_file / ask_reviewer tools."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Annotated, Callable, Literal
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 from pydantic import Field
 
 from coord_review import session_store
@@ -21,7 +21,7 @@ from coord_review.subprocess_util import (
 )
 
 
-mcp = FastMCP("coord-review")
+mcp = MCPServer("coord-review")
 
 
 ReviewerName = Literal["claude", "codex", "cursor"]
