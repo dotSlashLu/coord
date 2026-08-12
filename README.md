@@ -76,12 +76,33 @@ claude mcp add coord-review -- coord-review
 
 ### Cursor (`~/.cursor/mcp.json`)
 
+Installed CLI:
+
 ```json
 {
   "mcpServers": {
     "coord-review": {
       "command": "coord-review",
       "args": []
+    }
+  }
+}
+```
+
+Running from a local checkout with `uvx` (useful during development) — set
+`--from` to your clone's path. Any [configuration](#configuration) env var can
+go in the `env` block; here `COORD_REVIEW_TIMEOUT` raises the per-call wall-clock
+cap from the 600s default to 1800s (30 min):
+
+```json
+{
+  "mcpServers": {
+    "coord-review": {
+      "command": "uvx",
+      "args": ["--from", "/path/to/coord-review", "coord-review"],
+      "env": {
+        "COORD_REVIEW_TIMEOUT": "1800"
+      }
     }
   }
 }
@@ -95,10 +116,10 @@ Environment variables, all optional:
 |--------------------------------|--------------------------|------------------------------------------------|
 | `COORD_REVIEW_HOME`            | `~/.coord-review`        | Where the session-id mapping is stored.        |
 | `COORD_REVIEW_TIMEOUT`         | `600` (seconds)          | Wall-clock cap per reviewer call.              |
-| `COORD_REVIEW_CLAUDE_MODEL`    | `sonnet`                 | Model passed to `claude --model`.              |
+| `COORD_REVIEW_CLAUDE_MODEL`    | `opus`                   | Model passed to `claude --model`.              |
 | `COORD_REVIEW_CODEX_MODEL`     | Codex CLI default        | Optional model passed to `codex --model`.      |
 | `COORD_REVIEW_CODEX_SANDBOX`   | `read-only`              | Sandbox passed to `codex --sandbox`.           |
-| `COORD_REVIEW_CURSOR_MODEL`    | `claude-4.6-opus-high-thinking` | Model passed to `cursor-agent --model`.        |
+| `COORD_REVIEW_CURSOR_MODEL`    | `claude-opus-4-8-thinking-high` | Model passed to `cursor-agent --model`.        |
 | `COORD_REVIEW_MAX_DEPTH`       | `1`                      | How deep reviewer spawning may nest (see [Nested-review guard](#nested-review-guard)). |
 
 ## Sandbox behavior — what each reviewer can actually do

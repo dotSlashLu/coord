@@ -40,7 +40,7 @@ _UUID_RE = re.compile(
 
 
 def _cursor_model() -> str:
-    return os.environ.get("COORD_REVIEW_CURSOR_MODEL", "claude-4.6-opus-high-thinking")
+    return os.environ.get("COORD_REVIEW_CURSOR_MODEL", "claude-opus-4-8-thinking-high")
 
 
 def _parse_chat_id(stdout: str) -> str:

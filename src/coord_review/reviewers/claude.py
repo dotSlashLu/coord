@@ -55,7 +55,7 @@ ALLOWED_TOOLS = ",".join(
 
 
 def _claude_model() -> str:
-    return os.environ.get("COORD_REVIEW_CLAUDE_MODEL", "sonnet")
+    return os.environ.get("COORD_REVIEW_CLAUDE_MODEL", "opus")
 
 
 def _parse_envelope(stdout: str) -> tuple[str, str]:
