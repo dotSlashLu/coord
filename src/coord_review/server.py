@@ -45,13 +45,14 @@ def _resolve_version() -> str:
 _SERVER_INSTRUCTIONS = (
     "coord-review hands code off to a *different* coding agent.\n"
     "\n"
-    "Description: {description}\n"
+    "{gate}\n"
     "\n"
     "Reviewers: {reviewers}\n"
     "\n"
     "Rules:\n"
-    "1. Explicit request only. Invoke these tools when the user asked for a "
-    "review; do not fan out reviews proactively.\n"
+    "1. Explicit request only (see the gate above): a plain \u201creview this code\u201d "
+    "is not a request to spend a second agent. Do not fan out reviews "
+    "proactively.\n"
     "2. Never call from inside a review sub-flow. A reviewer you launch is "
     "itself a full agent that can see this same MCP server, so a review "
     "started inside a review becomes codex1 -> codex2 -> codex3, an "
@@ -199,16 +200,27 @@ _HEARTBEAT_SEC = max(0.0, float(os.environ.get("COORD_REVIEW_HEARTBEAT_SEC", "30
 # nesting, but beware the fork-bomb risk — see _DEPTH_ENV in subprocess_util.
 _MAX_DEPTH = max(1, int(os.environ.get("COORD_REVIEW_MAX_DEPTH", "1")))
 
-# Hint appended to each tool description: discourages the top-level agent from
-# proactively fanning out review (and from calling these tools inside a review
-# sub-flow). This is a soft nudge only — the hard backstop is the depth check
-# in _refuse_if_nested().
-_NESTING_HINT = (
-    "Only call this when the user has explicitly asked to use coord-review to "
-    "review code. Do NOT proactively invoke it without an explicit user "
-    "request, and never call it from inside a review sub-flow — that nests "
-    "reviewers and is blocked regardless."
+# The gate. This is the single most important thing a model must read before
+# calling any of these tools, so it leads BOTH channels: it is appended to every
+# tool description, and it is the first thing in ``instructions``. Order matters
+# because some clients bound the server-authored text they forward — Shrimp, for
+# one, projects it into one <=400-rune line (see
+# ``_INSTRUCTIONS_GATE_BUDGET_RUNES``), so a gate buried after the prose would be
+# truncated away.
+_USER_REQUEST_HINT = (
+    "Use this ONLY when the user explicitly asked for an external review — by "
+    "naming coord-review or one of the CLIs it drives (claude / codex / "
+    "cursor). A plain \u201creview this code\u201d does NOT qualify: review it yourself "
+    "unless the user asked to hand it off. Spending a second agent is the "
+    "user's call, not yours."
 )
+_NESTING_ONLY_HINT = (
+    "Never call it from inside a review sub-flow — that nests reviewers and is "
+    "blocked regardless."
+)
+# Appended to each tool description: the gate first, then the nesting rule.
+# Soft nudges only — the hard backstop is the depth check in _refuse_if_nested().
+_NESTING_HINT = _USER_REQUEST_HINT + " " + _NESTING_ONLY_HINT
 
 
 _TOOL_SUMMARIES = {
@@ -216,6 +228,13 @@ _TOOL_SUMMARIES = {
     "review_file": "Start a review of one file (parent dir is the reviewer's root).",
     "ask_reviewer": "Ask a follow-up in an existing review session by session_id.",
 }
+
+# Not a guess: this mirrors Shrimp's ``hiddenMCPInstructionsRunes``
+# (internal/agent/mcp_hidden.go), the bound it applies when projecting a
+# server's instructions into its system prompt as one ``说明：`` line. Any
+# consumer that trims server-authored text will cut from the end, so the gate
+# must fit inside this budget to survive. Asserted by the wire-contract tests.
+_INSTRUCTIONS_GATE_BUDGET_RUNES = 400
 
 
 def _server_instructions() -> str:
@@ -225,6 +244,11 @@ def _server_instructions() -> str:
     cross-cutting contract once per session. The nesting wording is derived
     from ``_MAX_DEPTH`` so the text can never claim a limit the server is not
     actually enforcing.
+
+    ``{gate}`` is ``_USER_REQUEST_HINT``: it leads the text so a client that
+    truncates or bounds server-authored instructions (Shrimp projects it into
+    a single ``<= _INSTRUCTIONS_GATE_BUDGET_RUNES``-rune line) still forwards
+    the rule that matters most.
     """
     if _MAX_DEPTH <= 1:
         nesting = (
@@ -238,7 +262,7 @@ def _server_instructions() -> str:
             "explicitly asked for a review within a review."
         )
     return _SERVER_INSTRUCTIONS.format(
-        description=_server_description(),
+        gate=_USER_REQUEST_HINT,
         reviewers=_REVIEWER_SUMMARY,
         nesting=nesting,
         tools="\n".join(

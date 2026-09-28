@@ -44,8 +44,29 @@ _REQUIRED_FRAGMENTS = {
     "ask_reviewer": ["follow-up", "prior context", "report"],
 }
 
-# The shared hint every tool must carry (see server._NESTING_HINT).
+# The shared hint every tool must carry (see server._NESTING_HINT). The gate
+# fragments are the load-bearing part: a request to merely "review this code"
+# must not be read as a request to spend a second agent.
 _NESTING_FRAGMENTS = ["explicitly asked", "review sub-flow"]
+
+# _USER_REQUEST_HINT must survive in both channels. Worded here as fragments so
+# the exact sentence can be reworded without rewriting the tests.
+_GATE_FRAGMENTS = [
+    "explicitly asked",
+    "review this code",
+    "does not qualify",
+    "yourself",
+]
+
+
+def _normalise(text: str) -> str:
+    """Collapse whitespace so fragment checks survive line re-wrapping.
+
+    Tool-description constants are written as concatenated Python string
+    literals, so a phrase can straddle a source line and arrive with the join
+    space (or newline) in the middle.
+    """
+    return " ".join(text.split())
 
 
 async def _handshake():
@@ -139,12 +160,59 @@ def test_tool_description_carries_required_content(handshake, tool_name):
 def test_tool_description_carries_nesting_hint(handshake, tool_name):
     _, tools = handshake
     tool = next(t for t in tools.tools if t.name == tool_name)
-    lowered = tool.description.lower()
+    lowered = _normalise(tool.description).lower()
     for fragment in _NESTING_FRAGMENTS:
         assert fragment in lowered, (
             f"{tool_name} description lost the nesting hint fragment "
             f"{fragment!r}; the soft nudge is documented in the README as "
             "reaching downstream agents through the tool schema"
+        )
+
+
+@pytest.mark.parametrize("tool_name", TOOL_NAMES)
+def test_tool_description_carries_the_gate(handshake, tool_name):
+    """Every tool must say that a plain "review this code" is not the trigger.
+
+    This is the fix for the observed failure mode: an agent asked to review code
+    reached for this MCP and handed the job to another agent instead of doing it
+    itself.
+    """
+    _, tools = handshake
+    tool = next(t for t in tools.tools if t.name == tool_name)
+    normalised = _normalise(tool.description).lower()
+    for fragment in _GATE_FRAGMENTS:
+        assert fragment in normalised, (
+            f"{tool_name} description lost the request gate fragment "
+            f"{fragment!r}; without it nothing stops an agent from delegating "
+            "a review the user asked *it* to perform"
+        )
+
+
+def test_gate_leads_the_instructions_and_fits_the_projection_budget(handshake):
+    """The gate must be first, and short enough to survive bounded clients.
+
+    Shrimp (internal/agent/mcp_hidden.go) flattens a server's instructions into
+    a single ``说明：`` line capped at ``hiddenMCPInstructionsRunes`` runes, and
+    consumers that trim take from the end. So the gate has to lead, and fit.
+    """
+    init, _ = handshake
+    body = init.instructions.split("\n", 1)[1].lstrip()  # after the title line
+    assert body.startswith(server._USER_REQUEST_HINT), (
+        "the request gate must be the first thing in the instructions; anything "
+        "earlier is what a bounded client keeps"
+    )
+    budget = server._INSTRUCTIONS_GATE_BUDGET_RUNES
+    assert len(server._USER_REQUEST_HINT) <= budget, (
+        f"gate is {len(server._USER_REQUEST_HINT)} runes, over the {budget}-rune "
+        "bound Shrimp applies when projecting server instructions"
+    )
+    # Mirrors Shrimp's projectHiddenMCPInstructions: collapse whitespace, then
+    # bound. Everything the model would actually receive must still be there.
+    projected = _normalise(init.instructions)[:budget]
+    for fragment in _GATE_FRAGMENTS:
+        assert fragment in projected.lower(), (
+            f"fragment {fragment!r} is truncated away by a {budget}-rune "
+            f"projection: {projected!r}"
         )
 
 

@@ -31,11 +31,13 @@ Three MCP tools, all over stdio:
 1. **Tool descriptions + parameter schemas** (`tools/list`) — per-tool detail:
    what each tool returns, when to prefer `review_repo` over `review_file`,
    and the `brief` guidance below.
-2. **Server instructions** (`InitializeResult.instructions`) — the same
-   cross-cutting contract restated once per session: explicit request only,
-   never from inside a review sub-flow, ask the user which reviewer, and treat
-   the report as advice. This exists because a model that only skims the tool
-   list can miss a rule that applies to all three tools.
+2. **Server instructions** (the `instructions` field of the discovery
+   response — `InitializeResult.instructions` on protocol ≤ 2025-11-25,
+   `DiscoverResult.instructions` on 2026-07-28+) — the same cross-cutting
+   contract restated once per session: the request gate below, never from
+   inside a review sub-flow, ask the user which reviewer, and treat the report
+   as advice. This exists because a model that only skims the tool list can
+   miss a rule that applies to all three tools.
 
 Descriptions are built from module-level constants and passed as
 `@mcp.tool(description=...)`, deliberately *not* written as function
@@ -44,6 +46,39 @@ docstrings: `MCPServer` reads `fn.__doc__`, which is `None` for the
 where every tool reached agents with `description == ""`).
 `tests/test_wire_contract.py` speaks real MCP over stdio and fails if any of
 this goes missing again.
+
+### The request gate
+
+Both channels lead with the same rule, and it is the point of the whole
+feature:
+
+> Use this **only** when the user explicitly asked for an external review — by
+> naming coord-review or one of the CLIs it drives (claude / codex / cursor).
+> A plain *“review this code”* does **not** qualify: review it yourself unless
+> the user asked to hand it off. Spending a second agent is the user's call,
+> not yours.
+
+Observed failure mode, which is why this exists: asked to review code, an
+agent handed the job to another agent through this MCP instead of doing it
+itself. Three properties make the gate as durable as a prompt can be:
+
+- **It is first.** The gate is the opening line of the instructions and is
+  appended to every tool description. Consumers that bound server-authored
+  text trim from the end, so anything before it would be what gets kept —
+  and nothing may precede it.
+- **It fits the tightest known bound.** Shrimp
+  (`internal/agent/mcp_hidden.go`, `hiddenMCPInstructionsRunes`) flattens a
+  server's instructions into a single `说明：` line capped at **400 runes**;
+  the gate is ~305. `_INSTRUCTIONS_GATE_BUDGET_RUNES` mirrors that number and
+  the tests assert the gate survives the projection.
+- **It is verified where it lands.** The tests assert the gate in the wire
+  payload of both channels, not in the source constants.
+
+Be honest about the boundary: this is a **hint, not a gate**. Nothing stops a
+model that ignores it, because no MCP server can distinguish "review this
+code" from "have Claude review this code" — only the calling model sees the
+user's raw words. What the server *can* enforce is the recursion backstop
+(`_refuse_if_nested`), which is a separate rule with a real hard check.
 
 `reviewer` is `"claude"`, `"codex"`, or `"cursor"`. The `brief` is a
 free-form review request — describe the change's purpose, scope, and what to
