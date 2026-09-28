@@ -26,6 +26,25 @@ Three MCP tools, all over stdio:
 | `review_file` | Review one file (no project / git required). Args: `reviewer`, `file_path`, `brief`. |
 | `ask_reviewer`| Follow up on an existing review. Args: `session_id`, `question`. |
 
+### Two channels carry guidance to the calling agent
+
+1. **Tool descriptions + parameter schemas** (`tools/list`) — per-tool detail:
+   what each tool returns, when to prefer `review_repo` over `review_file`,
+   and the `brief` guidance below.
+2. **Server instructions** (`InitializeResult.instructions`) — the same
+   cross-cutting contract restated once per session: explicit request only,
+   never from inside a review sub-flow, ask the user which reviewer, and treat
+   the report as advice. This exists because a model that only skims the tool
+   list can miss a rule that applies to all three tools.
+
+Descriptions are built from module-level constants and passed as
+`@mcp.tool(description=...)`, deliberately *not* written as function
+docstrings: `MCPServer` reads `fn.__doc__`, which is `None` for the
+`"""body""" + _NESTING_HINT + """..."""` idiom (that bug shipped a release
+where every tool reached agents with `description == ""`).
+`tests/test_wire_contract.py` speaks real MCP over stdio and fails if any of
+this goes missing again.
+
 `reviewer` is `"claude"`, `"codex"`, or `"cursor"`. The `brief` is a
 free-form review request — describe the change's purpose, scope, and what to
 focus on. The reviewer reads files itself; the brief is the contract.

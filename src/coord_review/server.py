@@ -21,7 +21,71 @@ from coord_review.subprocess_util import (
 )
 
 
-mcp = MCPServer("coord-review")
+def _resolve_version() -> str:
+    """Report the installed distribution version, or an explicit placeholder.
+
+    ``MCPServer`` defaults ``version`` to ``""``, which reaches clients as
+    ``serverInfo.version = ""`` — that reads as a client-side bug rather than
+    as "this server has no version". Running from a source checkout that was
+    never installed is a legitimate case, so fall back to a visible sentinel
+    instead of silently claiming the empty string.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("coord-review")
+    except PackageNotFoundError:
+        return "0.0.0+source"
+
+
+# Server-level guidance. Tool descriptions are per-call and can be skimmed;
+# this restates the cross-cutting contract once per session. Rendered by
+# ``_server_instructions()`` below, which is also what the wire-contract tests
+# call directly to check the text against ``COORD_REVIEW_MAX_DEPTH``.
+_SERVER_INSTRUCTIONS = (
+    "coord-review hands code off to a *different* coding agent.\n"
+    "\n"
+    "Description: {description}\n"
+    "\n"
+    "Reviewers: {reviewers}\n"
+    "\n"
+    "Rules:\n"
+    "1. Explicit request only. Invoke these tools when the user asked for a "
+    "review; do not fan out reviews proactively.\n"
+    "2. Never call from inside a review sub-flow. A reviewer you launch is "
+    "itself a full agent that can see this same MCP server, so a review "
+    "started inside a review becomes codex1 -> codex2 -> codex3, an "
+    "unbounded chain. {nesting}\n"
+    "3. Ask the user which reviewer to use rather than choosing for them.\n"
+    "4. Treat a returned `report` as advice: verify each finding, and if you "
+    "disagree, explain your reasoning to the user instead of silently acting.\n"
+    "\n"
+    "Tools:\n{tools}\n"
+)
+
+_REVIEWER_SUMMARY = (
+    "claude, codex, and cursor each run their own CLI headlessly; the choice "
+    "is bound to a session at creation and cannot be changed in a follow-up. "
+    "They differ in cost, latency and sandbox strength, not in the shape of "
+    "the report."
+)
+
+
+_SERVER_DESCRIPTION_FALLBACK = (
+    "MCP server that lets one coding agent ask another coding agent "
+    "(Claude, Codex, or Cursor) to review its work, with resumable "
+    "follow-up sessions."
+)
+
+
+def _server_description() -> str:
+    """One-line summary; mirrors ``pyproject.toml``'s project description."""
+    from importlib.metadata import PackageNotFoundError, metadata
+
+    try:
+        return metadata("coord-review")["Summary"] or _SERVER_DESCRIPTION_FALLBACK
+    except (PackageNotFoundError, KeyError):
+        return _SERVER_DESCRIPTION_FALLBACK
 
 
 ReviewerName = Literal["claude", "codex", "cursor"]
@@ -58,6 +122,63 @@ _QUESTION_DESCRIPTION = (
     "to earlier findings by file/line, not by quoting them back."
 )
 
+# Tool-level descriptions. These are assembled from constants and passed to the
+# decorator explicitly (``@mcp.tool(description=...)``) rather than written as
+# function docstrings: under the v2 ``MCPServer`` the decorator reads
+# ``fn.__doc__``, which is ``None`` for the ``"""body""" + _NESTING_HINT + """."""
+# idiom this file used to use. That idiom left every tool with an empty
+# description on the wire, nesting hint included (see
+# ``tests/test_wire_contract.py``). An explicit argument keeps the wire value
+# independent of docstring grammar.
+_REVIEW_REPO_DESCRIPTION = (
+    "Ask another coding agent to review a directory of code.\n\n"
+    "Returns a dict with these keys:\n\n"
+    "- `reviewer` (str): the CLI that ran (\"claude\", \"codex\", or \"cursor\").\n"
+    "- `session_id` (str): opaque handle of form `cs_<uuid>` you can pass to "
+    "`ask_reviewer` to follow up. Empty string when `status` is \"error\" or "
+    "\"timeout\" and the reviewer crashed before producing a usable session "
+    "— follow-ups are NOT possible in that case.\n"
+    "- `status` (str): one of `\"ok\"`, `\"error\"`, `\"timeout\"`.\n"
+    "- `report` (str): the reviewer's findings (the main body to read).\n"
+    "- `returncode` (int): raw process exit code; usually redundant with "
+    "`status` and only useful for debugging.\n"
+    "- `stderr_tail` (str): last 40 lines of reviewer stderr, for debugging "
+    "crashes or empty reports.\n\n"
+    "IMPORTANT: do not blindly accept everything in `report`. Assess whether "
+    "each finding is real and actually needs fixing. If you are unsure about a "
+    "finding, explain your reasoning (e.g. relevant code context, design intent) "
+    "to the user and let them decide instead of applying the change yourself.\n\n"
+)
+_REVIEW_FILE_DESCRIPTION = (
+    "Ask another coding agent to review a single file.\n\n"
+    "The reviewer's working directory is set to the file's parent folder "
+    "(not the surrounding repository root, if any) — see the `file_path` "
+    "description for when that matters. The file path is prepended to the "
+    "brief so the reviewer knows where to look.\n\n"
+    "Returns the same shape as `review_repo`: a dict with `reviewer`, "
+    "`session_id` (empty on failure), `status` (`\"ok\" | \"error\" | \"timeout\"`), "
+    "`report`, `returncode`, and `stderr_tail`. Follow up via `ask_reviewer` "
+    "with the returned `session_id`.\n\n"
+    "IMPORTANT: do not blindly accept everything in `report`. Assess whether "
+    "each finding is real and actually needs fixing. If you are unsure about a "
+    "finding, explain your reasoning (e.g. relevant code context, design intent) "
+    "to the user and let them decide instead of applying the change yourself.\n\n"
+)
+_ASK_REVIEWER_DESCRIPTION = (
+    "Ask a follow-up question in an existing review session.\n\n"
+    "The reviewer keeps full prior context from the original `review_repo` "
+    "or `review_file` call — refer to earlier findings by file/line, don't "
+    "repeat them.\n\n"
+    "Returns the same shape as `review_repo` / `review_file`: a dict with "
+    "`reviewer`, `session_id`, `status` (`\"ok\" | \"error\" | \"timeout\"`), "
+    "`report`, `returncode`, and `stderr_tail`. The `report` field holds "
+    "the reviewer's answer to this follow-up.\n\n"
+    "IMPORTANT: do not blindly accept everything in `report`. Assess whether "
+    "each finding is real and actually needs fixing. If you are unsure about a "
+    "finding, explain your reasoning (e.g. relevant code context, design intent) "
+    "to the user and let them decide instead of applying the change yourself.\n\n"
+)
+
 
 # Bound the in-flight progress log buffer. A verbose reviewer can emit
 # thousands of stderr lines; without a bound the queue grows until the MCP
@@ -87,6 +208,50 @@ _NESTING_HINT = (
     "review code. Do NOT proactively invoke it without an explicit user "
     "request, and never call it from inside a review sub-flow — that nests "
     "reviewers and is blocked regardless."
+)
+
+
+_TOOL_SUMMARIES = {
+    "review_repo": "Start a review of a whole directory (pass a repo root).",
+    "review_file": "Start a review of one file (parent dir is the reviewer's root).",
+    "ask_reviewer": "Ask a follow-up in an existing review session by session_id.",
+}
+
+
+def _server_instructions() -> str:
+    """Render the server-level guidance text.
+
+    Tool descriptions are per-call and can be skimmed; this restates the
+    cross-cutting contract once per session. The nesting wording is derived
+    from ``_MAX_DEPTH`` so the text can never claim a limit the server is not
+    actually enforcing.
+    """
+    if _MAX_DEPTH <= 1:
+        nesting = (
+            "The refusal is a hard check in the server, not guidance you can "
+            "reason your way around: no prompt makes a nested review succeed."
+        )
+    else:
+        nesting = (
+            f"This machine allows nesting up to depth {_MAX_DEPTH} "
+            "(COORD_REVIEW_MAX_DEPTH); still avoid it unless the user "
+            "explicitly asked for a review within a review."
+        )
+    return _SERVER_INSTRUCTIONS.format(
+        description=_server_description(),
+        reviewers=_REVIEWER_SUMMARY,
+        nesting=nesting,
+        tools="\n".join(
+            f"- {name}: {summary}" for name, summary in _TOOL_SUMMARIES.items()
+        ),
+    )
+
+
+mcp: MCPServer = MCPServer(
+    "coord-review",
+    version=_resolve_version(),
+    description=_server_description(),
+    instructions=_server_instructions(),
 )
 
 
@@ -287,7 +452,7 @@ async def _persist_and_format(
     return _format_report(reviewer, record.our_id, result)
 
 
-@mcp.tool()
+@mcp.tool(description=_REVIEW_REPO_DESCRIPTION + _NESTING_HINT)
 async def review_repo(
     reviewer: Annotated[ReviewerName, Field(description=_REVIEWER_DESCRIPTION)],
     repo_dir: Annotated[
@@ -305,29 +470,6 @@ async def review_repo(
     brief: Annotated[str, Field(description=_BRIEF_DESCRIPTION)],
     ctx: Context,
 ) -> dict:
-    """Ask another coding agent to review a directory of code.
-
-    Returns a dict with these keys:
-
-    - `reviewer` (str): the CLI that ran ("claude", "codex", or "cursor").
-    - `session_id` (str): opaque handle of form `cs_<uuid>` you can pass to
-      `ask_reviewer` to follow up. Empty string when `status` is "error" or
-      "timeout" and the reviewer crashed before producing a usable session
-      — follow-ups are NOT possible in that case.
-    - `status` (str): one of `"ok"`, `"error"`, `"timeout"`.
-    - `report` (str): the reviewer's findings (the main body to read).
-    - `returncode` (int): raw process exit code; usually redundant with
-      `status` and only useful for debugging.
-    - `stderr_tail` (str): last 40 lines of reviewer stderr, for debugging
-      crashes or empty reports.
-
-    IMPORTANT: do not blindly accept everything in `report`. Assess whether
-    each finding is real and actually needs fixing. If you are unsure about a
-    finding, explain your reasoning (e.g. relevant code context, design intent)
-    to the user and let them decide instead of applying the change yourself.
-
-    """ + _NESTING_HINT + """
-    """
     _refuse_if_nested()
     repo = _ensure_absolute("repo_dir", repo_dir)
     if not repo.is_dir():
@@ -348,7 +490,7 @@ async def review_repo(
     return await _persist_and_format(reviewer, result, str(repo), ctx)
 
 
-@mcp.tool()
+@mcp.tool(description=_REVIEW_FILE_DESCRIPTION + _NESTING_HINT)
 async def review_file(
     reviewer: Annotated[ReviewerName, Field(description=_REVIEWER_DESCRIPTION)],
     file_path: Annotated[
@@ -368,25 +510,6 @@ async def review_file(
     brief: Annotated[str, Field(description=_BRIEF_DESCRIPTION)],
     ctx: Context,
 ) -> dict:
-    """Ask another coding agent to review a single file.
-
-    The reviewer's working directory is set to the file's parent folder
-    (not the surrounding repository root, if any) — see the `file_path`
-    description for when that matters. The file path is prepended to the
-    brief so the reviewer knows where to look.
-
-    Returns the same shape as `review_repo`: a dict with `reviewer`,
-    `session_id` (empty on failure), `status` (`"ok" | "error" | "timeout"`),
-    `report`, `returncode`, and `stderr_tail`. Follow up via `ask_reviewer`
-    with the returned `session_id`.
-
-    IMPORTANT: do not blindly accept everything in `report`. Assess whether
-    each finding is real and actually needs fixing. If you are unsure about a
-    finding, explain your reasoning (e.g. relevant code context, design intent)
-    to the user and let them decide instead of applying the change yourself.
-
-    """ + _NESTING_HINT + """
-    """
     _refuse_if_nested()
     target = _ensure_absolute("file_path", file_path)
     if not target.is_file():
@@ -409,7 +532,7 @@ async def review_file(
     return await _persist_and_format(reviewer, result, str(cwd), ctx)
 
 
-@mcp.tool()
+@mcp.tool(description=_ASK_REVIEWER_DESCRIPTION + _NESTING_HINT)
 async def ask_reviewer(
     session_id: Annotated[
         str,
@@ -427,24 +550,6 @@ async def ask_reviewer(
     question: Annotated[str, Field(description=_QUESTION_DESCRIPTION)],
     ctx: Context,
 ) -> dict:
-    """Ask a follow-up question in an existing review session.
-
-    The reviewer keeps full prior context from the original `review_repo`
-    or `review_file` call — refer to earlier findings by file/line, don't
-    repeat them.
-
-    Returns the same shape as `review_repo` / `review_file`: a dict with
-    `reviewer`, `session_id`, `status` (`"ok" | "error" | "timeout"`),
-    `report`, `returncode`, and `stderr_tail`. The `report` field holds
-    the reviewer's answer to this follow-up.
-
-    IMPORTANT: do not blindly accept everything in `report`. Assess whether
-    each finding is real and actually needs fixing. If you are unsure about a
-    finding, explain your reasoning (e.g. relevant code context, design intent)
-    to the user and let them decide instead of applying the change yourself.
-
-    """ + _NESTING_HINT + """
-    """
     _refuse_if_nested()
     if not question.strip():
         raise ValueError("question must not be empty")
@@ -485,6 +590,12 @@ async def ask_reviewer(
 def main() -> None:
     """Entry point for the ``coord-review`` console script."""
     # ``mcp.run()`` defaults to stdio, which is what every supported client wants.
+    #
+    # ``version`` / ``description`` / ``instructions`` are rendered at import,
+    # when MCPServer is constructed — they are read-only properties afterwards.
+    # That is the same moment the env-derived constants (_MAX_DEPTH,
+    # _HEARTBEAT_SEC) are read, so the announced configuration always matches
+    # the one the server enforces.
     mcp.run()
 
 
